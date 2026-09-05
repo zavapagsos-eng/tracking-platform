@@ -1,0 +1,44 @@
+# Shopify Web Pixel extension — Store B (checkout).
+#
+# Same schema/verification notes as extensions/web-pixel-store-a. This
+# pixel has one additional job beyond analytics: recognizing the
+# cross-domain transfer handed off from Store A (docs/ARCHITECTURE.md
+# section C) by reading the `ttid` checkout attribute and redeeming it.
+type = "web_pixel_extension"
+name = "tracking-platform-store-b-pixel"
+uid = "00000000-0000-0000-0000-000000000002"
+
+runtime_context = "strict"
+
+[customer_privacy]
+analytics = true
+marketing = true
+preferences = false
+sale_of_data = "enabled"
+
+[settings]
+type = "object"
+
+[settings.fields.gateway_url]
+name = "Tracking Gateway URL"
+description = "Base URL of the Tracking Gateway's public ingestion endpoint"
+type = "single_line_text_field"
+validations = [{ name = "min", value = "1" }]
+
+[settings.fields.shop_id]
+name = "Shop identifier"
+description = "Internal shop_id this pixel reports as (matches TrackingEventV1 shop.shop_id)"
+type = "single_line_text_field"
+validations = [{ name = "min", value = "1" }]
+
+[settings.fields.environment]
+name = "Tracking environment"
+description = "One of development, staging, production — must match TRACKING_ENV on the Gateway"
+type = "single_line_text_field"
+validations = [{ name = "min", value = "1" }]
+
+[settings.fields.app_proxy_base_path]
+name = "App Proxy base path"
+description = "Same-origin path Shopify forwards to the Gateway's /proxy/* routes, e.g. /apps/tracking (see routes/proxy.ts). Used to redeem the cross-domain transfer without ever exposing a secret to the browser."
+type = "single_line_text_field"
+validations = [{ name = "min", value = "1" }]

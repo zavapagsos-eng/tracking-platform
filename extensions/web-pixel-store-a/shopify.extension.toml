@@ -1,0 +1,58 @@
+# Shopify Web Pixel extension — Store A (storefront).
+#
+# This file follows the schema documented at
+# https://shopify.dev/docs/apps/build/marketing-analytics/build-web-pixels
+# (verified Phase 0/4 — see docs/PHASE_LOG.md). When this extension is
+# scaffolded for real inside a Shopify app project (`shopify app generate
+# extension`), the CLI will assign a real `uid` — the placeholder below
+# must be replaced, never reused across environments.
+type = "web_pixel_extension"
+name = "tracking-platform-store-a-pixel"
+uid = "00000000-0000-0000-0000-000000000001"
+
+# App Pixels always run in the "strict" sandbox (no direct DOM access,
+# only the analytics/browser/init/settings APIs) — see ARCHITECTURE.md
+# section A. This is required, not a choice: Custom Pixels (the "lax"
+# sandbox) can only be configured from the Shopify admin UI directly by
+# the merchant, not shipped as part of an app.
+runtime_context = "strict"
+
+# Gates whether this pixel's register() callback runs at all, based on the
+# customer's consent state as Shopify's own Customer Privacy API resolves
+# it for the shop's configured banner/CMP. This is enforced by Shopify
+# BEFORE our code ever executes — it is a second, platform-level layer on
+# top of (not a replacement for) the Gateway's own `consent_states` check
+# described in ARCHITECTURE.md section I, which additionally covers
+# server-side/webhook-originated events that never go through a pixel.
+[customer_privacy]
+analytics = true
+marketing = true
+preferences = false
+sale_of_data = "enabled"
+
+# Non-secret configuration only — this file (and the compiled pixel code)
+# ships to the browser and is fully inspectable by anyone. The Gateway URL
+# is not sensitive; nothing that IS sensitive (API secrets, tokens) is ever
+# defined here (spec section 59: never put a Shopify/app secret in the
+# browser). App-Proxy-authenticated calls (transfer create/redeem) never
+# need a secret in this pixel either — see routes/proxy.ts in the Gateway.
+[settings]
+type = "object"
+
+[settings.fields.gateway_url]
+name = "Tracking Gateway URL"
+description = "Base URL of the Tracking Gateway's public ingestion endpoint, e.g. https://gateway.example.com"
+type = "single_line_text_field"
+validations = [{ name = "min", value = "1" }]
+
+[settings.fields.shop_id]
+name = "Shop identifier"
+description = "Internal shop_id this pixel reports as (matches TrackingEventV1 shop.shop_id)"
+type = "single_line_text_field"
+validations = [{ name = "min", value = "1" }]
+
+[settings.fields.environment]
+name = "Tracking environment"
+description = "One of development, staging, production — must match TRACKING_ENV on the Gateway (spec section 40: never mix staging events with production)."
+type = "single_line_text_field"
+validations = [{ name = "min", value = "1" }]

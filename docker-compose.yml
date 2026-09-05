@@ -1,0 +1,133 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: tracking
+      POSTGRES_PASSWORD: tracking_dev_pw
+      POSTGRES_DB: tracking_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tracking"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # One-off migration runner (Phase 16) — NOT started by `docker compose up`
+  # (the "tools" profile keeps it out of the default set). Run explicitly,
+  # once, before (re)starting gateway/worker/reconciliation on a new schema
+  # version: `docker compose run --rm migrate`. Kept as its own service
+  # rather than a step inside `gateway`'s entrypoint so that scaling
+  # `gateway` to N replicas never risks N containers racing to run
+  # migrations concurrently on boot — see docs/DEPLOYMENT.md.
+  migrate:
+    profiles: ["tools"]
+    build:
+      context: .
+      dockerfile: apps/gateway/Dockerfile
+    environment:
+      DATABASE_URL: postgresql://tracking:tracking_dev_pw@postgres:5432/tracking_dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["npm", "run", "db:migrate:start", "-w", "@tracking/db"]
+
+  gateway:
+    build:
+      context: .
+      dockerfile: apps/gateway/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://tracking:tracking_dev_pw@postgres:5432/tracking_dev
+      REDIS_URL: redis://redis:6379
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # Plain `node` (no curl/wget dependency) hitting the liveness route
+      # registered in routes/health.ts — a non-zero exit on a non-2xx
+      # response or a connection error is exactly what Docker's healthcheck
+      # protocol expects.
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('node:http').get('http://127.0.0.1:3000/health', (r) => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # Meta CAPI delivery worker (Phase 11) — consumes the BullMQ queue that
+  # `gateway` publishes to (`lib/metaQueue.ts`). Same built image as
+  # `gateway` (same Dockerfile, same COPYed dist/), only the process
+  # entrypoint differs — reusing the image avoids building it twice and
+  # guarantees the worker always runs the exact code the gateway was built
+  # from. Runs as its own process/container, never as a side effect of the
+  # HTTP server (see docs/PHASE_LOG.md Phase 11).
+  worker:
+    build:
+      context: .
+      dockerfile: apps/gateway/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://tracking:tracking_dev_pw@postgres:5432/tracking_dev
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["node", "apps/gateway/dist/worker.js"]
+
+  # Reconciliation Engine (Phase 12) — its own standalone cron process,
+  # never a side effect of the HTTP gateway or the worker (see
+  # lib/reconciliationCron.ts / docs/PHASE_LOG.md Phase 12). Works without
+  # REDIS_URL too (scan-only, no auto-requeue), but this compose file
+  # always has Redis available, so auto-requeue is active here.
+  reconciliation:
+    build:
+      context: .
+      dockerfile: apps/gateway/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://tracking:tracking_dev_pw@postgres:5432/tracking_dev
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["node", "apps/gateway/dist/reconciliationCron.js"]
+
+volumes:
+  postgres_data:
+  redis_data:

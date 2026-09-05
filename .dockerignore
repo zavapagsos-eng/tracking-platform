@@ -1,0 +1,23 @@
+# Keeps the Docker build context small and, more importantly, makes sure
+# `.env` (and anything else that must never be baked into an image layer)
+# can never be picked up by a `COPY . .`-style instruction even if one is
+# added later. apps/gateway/Dockerfile currently COPYs explicit paths, not
+# `.`, but this file is the backstop regardless of how the Dockerfile
+# evolves — see docs/DEPLOYMENT.md's "Segredos" section for why secrets
+# are injected at runtime (env vars) and never at build time.
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+build/
+**/build/
+coverage/
+**/coverage/
+*.log
+.env
+.env.*
+!.env.example
+.git/
+.DS_Store
+*.tsbuildinfo
+docs/

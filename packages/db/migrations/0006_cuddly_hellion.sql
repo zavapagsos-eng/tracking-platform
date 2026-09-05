@@ -1,0 +1,1 @@
+ALTER TABLE "attribution_touches" ADD COLUMN "gclid" text;

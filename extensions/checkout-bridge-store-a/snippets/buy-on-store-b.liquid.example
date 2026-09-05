@@ -1,0 +1,96 @@
+{%- comment -%}
+  EXAMPLE ONLY — not auto-installed. A developer must adapt the selector(s)
+  below to the merchant's actual theme (button markup varies a lot between
+  themes) and load this alongside the compiled checkoutBridge.js asset via
+  a Theme App Extension app-embed block.
+
+  This snippet does NOT replace Shopify's native checkout button generally
+  — it is specifically for the Hub topology described in docs/ARCHITECTURE.md
+  section C: one storefront ("Hub") showcasing products that each redirect
+  to checkout on one of several distinct destination stores (2-10, per
+  docs/PHASE_LOG.md's "Correção de Arquitetura — Multi-Loja de Destino").
+  Different products on the SAME Hub page can send the customer to
+  DIFFERENT destination stores/domains — this snippet is written per-product,
+  not per-page, for exactly that reason.
+
+  The mapping of "this product -> that destination store" already exists in
+  the merchant's own Shopify data (a product tag, a metafield, or collection
+  membership — whichever the merchant already uses to decide where a product
+  checks out) and is read here in Liquid, at render time, on the server. This
+  snippet never guesses or hardcodes a single destination store for the whole
+  theme. The two concrete examples below show a metafield and a tag; use
+  whichever the merchant's catalog already has, or adapt to a third scheme.
+{%- endcomment -%}
+
+{%- comment -%}
+  Example A: destination store recorded as a product metafield, e.g.
+  `product.metafields.tracking.destination_shop_id` set to "store-b",
+  "store-c", etc. — must match a shop_id registered in the Gateway's
+  SHOPIFY_STORES config (apps/gateway/src/config.ts).
+{%- endcomment -%}
+{%- assign destination_shop_id = product.metafields.tracking.destination_shop_id | default: "" -%}
+
+{%- comment -%}
+  Example B: falls back to reading it off a product tag shaped like
+  "destination:store-c", for merchants who prefer tags over metafields.
+  Only used if the metafield above wasn't set.
+{%- endcomment -%}
+{%- if destination_shop_id == "" -%}
+  {%- for tag in product.tags -%}
+    {%- if tag contains "destination:" -%}
+      {%- assign destination_shop_id = tag | remove: "destination:" -%}
+    {%- endif -%}
+  {%- endfor -%}
+{%- endif -%}
+
+{%- comment -%}
+  Each destination store also needs its own fallback checkout URL (fail-open
+  path per spec section 50) and its own cart permalink domain — both are
+  properties of the destination store, not of the Hub, so they are looked up
+  the same way as the shop id above rather than assumed to be a single
+  Gateway-wide domain. This example assumes a matching
+  `tracking.fallback_checkout_domain` metafield holding e.g.
+  "store-c.example.com"; adapt to however the merchant's theme already
+  tracks each destination store's domain.
+{%- endcomment -%}
+{%- assign destination_domain = product.metafields.tracking.fallback_checkout_domain -%}
+
+<script>
+  document.addEventListener('DOMContentLoaded', function () {
+    var buyButton = document.querySelector('[data-buy-on-destination-store]');
+    if (!buyButton) return;
+
+    buyButton.addEventListener('click', async function (event) {
+      event.preventDefault();
+
+      var cartResponse = await fetch('/cart.js');
+      var cart = await cartResponse.json();
+
+      // trackingId/sessionId are the same cookies the Web Pixel
+      // (extensions/web-pixel-store-a) maintains — read here via a tiny
+      // inline helper rather than duplicating the pixel's cookie logic;
+      // see checkoutBridge.ts for the shared TypeScript implementation
+      // this example is a plain-JS sketch of.
+      var trackingId = window.__trackingPlatform.getTrackingId();
+      var sessionId = window.__trackingPlatform.getSessionId();
+
+      await window.__trackingPlatform.initiateTransferAndRedirect({
+        trackingId: trackingId,
+        sessionId: sessionId,
+        cart: cart,
+        destinationShopId: buyButton.getAttribute('data-destination-shop-id'),
+        appProxyBasePath: '/apps/tracking',
+        gatewayPublicUrl: '{{ settings.tracking_gateway_url }}',
+        fallbackCheckoutUrl: buyButton.getAttribute('data-fallback-checkout-url'),
+      });
+    });
+  });
+</script>
+
+<button
+  data-buy-on-destination-store
+  data-destination-shop-id="{{ destination_shop_id }}"
+  data-fallback-checkout-url="https://{{ destination_domain }}/cart"
+>
+  Buy now
+</button>

@@ -1,0 +1,1 @@
+ALTER TABLE "transfers" ADD COLUMN "destination_shop_id" text NOT NULL;
