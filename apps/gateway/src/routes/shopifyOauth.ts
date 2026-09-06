@@ -1,51 +1,17 @@
 import type { FastifyInstance } from "fastify";
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { findStoreByMyshopifyDomain, type GatewayConfig } from "../config.js";
+import { getPixelApps, activateWebPixel } from "../lib/webPixelActivation.js";
 
 /**
- * Activates the Web Pixel extension shipped by one of this project's two
- * small Shopify apps ("Store A" / Hub, "Store B" / checkout stores — see
- * config.ts's PIXEL_APP_STORE_A/B_* comment for why there are two).
- *
- * A Web Pixel App Extension does NOT self-activate on install — confirmed
- * against shopify.dev/docs/apps/build/marketing-analytics/build-web-pixels
- * after it silently failed to appear in Settings > Customer events despite
- * a clean `shopify app deploy` and a successful install: the merchant's
- * OAuth grant only authorizes the app; something authenticated as that
- * install still has to call the `webPixelCreate` Admin GraphQL mutation
- * once, with the pixel's initial `settings` JSON, before Shopify creates
- * the pixel record and flips it from absent to "Connected." This route is
- * that "something" — the standard OAuth authorization-code callback,
- * reached because each app's `shopify.app.toml` `[auth] redirect_urls`
- * points here instead of the CLI-scaffolded placeholder.
+ * The classic OAuth authorization-code callback — kept as a fallback, but
+ * confirmed NOT to be the route Shopify actually uses for this project's
+ * two `embedded = true` Web Pixel apps (see routes/shopifyEmbedded.ts's
+ * header comment for what real installs hit instead: the embedded
+ * token-exchange bootstrap at the Gateway's bare root). Left in place in
+ * case a future non-embedded distribution of one of these apps, or a
+ * scope-change reauthorization, ever does redirect through
+ * `[auth] redirect_urls`.
  */
-
-interface PixelAppDef {
-  clientId: string;
-  clientSecret: string;
-  /** Matches StoreEntry.role — decides which extra Web Pixel settings
-   * field this app's install needs (see buildSettings below). */
-  kind: "storefront" | "checkout";
-}
-
-function getPixelApps(config: GatewayConfig): PixelAppDef[] {
-  const apps: PixelAppDef[] = [];
-  if (config.PIXEL_APP_STORE_A_CLIENT_ID && config.PIXEL_APP_STORE_A_CLIENT_SECRET) {
-    apps.push({
-      clientId: config.PIXEL_APP_STORE_A_CLIENT_ID,
-      clientSecret: config.PIXEL_APP_STORE_A_CLIENT_SECRET,
-      kind: "storefront",
-    });
-  }
-  if (config.PIXEL_APP_STORE_B_CLIENT_ID && config.PIXEL_APP_STORE_B_CLIENT_SECRET) {
-    apps.push({
-      clientId: config.PIXEL_APP_STORE_B_CLIENT_ID,
-      clientSecret: config.PIXEL_APP_STORE_B_CLIENT_SECRET,
-      kind: "checkout",
-    });
-  }
-  return apps;
-}
 
 /** Verifies Shopify's OAuth callback signature: HMAC-SHA256 (hex) of every
  * query param except `hmac`/`signature`, sorted by key and joined
@@ -70,25 +36,6 @@ function verifyOauthHmac(query: Record<string, string>, clientSecret: string): b
   }
   if (expectedBuf.length !== providedBuf.length) return false;
   return timingSafeEqual(expectedBuf, providedBuf);
-}
-
-function buildPixelSettings(
-  config: GatewayConfig,
-  app: PixelAppDef,
-  shopId: string | undefined,
-): Record<string, string> {
-  const settings: Record<string, string> = {
-    gateway_url: config.GATEWAY_PUBLIC_URL ?? "",
-    shop_id: shopId ?? "",
-    environment: config.TRACKING_ENV,
-  };
-  if (app.kind === "checkout") {
-    // Matches extensions/web-pixel-store-b/shopify.extension.toml's
-    // `app_proxy_base_path` field — the fixed App Proxy path this app is
-    // configured with on every install, never per-shop.
-    settings.app_proxy_base_path = "/apps/tracking";
-  }
-  return settings;
 }
 
 export async function registerShopifyOauthRoutes(app: FastifyInstance): Promise<void> {
@@ -141,70 +88,7 @@ export async function registerShopifyOauthRoutes(app: FastifyInstance): Promise<
       return reply.code(502).send({ error: "token_exchange_error" });
     }
 
-    const store = findStoreByMyshopifyDomain(app.config, shop);
-    if (!store) {
-      // Fail closed rather than activating a pixel with a blank shop_id
-      // (spec section 6/59: never guess a store's identity) — this store
-      // still needs a SHOPIFY_STORES entry (with myshopify_domain set)
-      // before its pixel can report events with a valid shop_id.
-      // Logs only shop_id/domain/role — never webhook_secret — so this is
-      // safe to inspect via `railway logs` when diagnosing a mismatch
-      // between a real install's `shop` and this registry's `domain`/
-      // `myshopify_domain` without needing to expose any secret.
-      const knownStores = app.config.SHOPIFY_STORES.map((s) => ({
-        shop_id: s.shop_id,
-        domain: s.domain,
-        myshopify_domain: s.myshopify_domain,
-        role: s.role,
-      }));
-      app.log.error({ shop, knownStores }, "shopify oauth callback: no SHOPIFY_STORES entry for this shop");
-      return reply
-        .code(500)
-        .type("text/html")
-        .send(
-          `<html><body><h1>Instalação incompleta</h1><p>A loja ${shop} ainda não está cadastrada no Gateway (SHOPIFY_STORES). Avise o time técnico.</p></body></html>`,
-        );
-    }
-
-    const settings = buildPixelSettings(app.config, pixelApp, store.shop_id);
-    const mutation = `mutation TrackingPlatformWebPixelCreate($webPixel: WebPixelInput!) {
-      webPixelCreate(webPixel: $webPixel) {
-        userErrors { field message }
-        webPixel { id }
-      }
-    }`;
-
-    try {
-      const gqlResponse = await fetch(`https://${shop}/admin/api/2026-10/graphql.json`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Shopify-Access-Token": accessToken,
-        },
-        body: JSON.stringify({
-          query: mutation,
-          variables: { webPixel: { settings: JSON.stringify(settings) } },
-        }),
-      });
-      const gqlJson = (await gqlResponse.json()) as {
-        data?: { webPixelCreate?: { userErrors?: { field: string[]; message: string }[]; webPixel?: { id: string } } };
-        errors?: unknown;
-      };
-      const userErrors = gqlJson.data?.webPixelCreate?.userErrors ?? [];
-      if (!gqlResponse.ok || gqlJson.errors || userErrors.length > 0) {
-        app.log.warn(
-          { shop, shopId: store.shop_id, status: gqlResponse.status, errors: gqlJson.errors, userErrors },
-          "shopify oauth callback: webPixelCreate did not succeed cleanly",
-        );
-      } else {
-        app.log.info(
-          { shop, shopId: store.shop_id, webPixelId: gqlJson.data?.webPixelCreate?.webPixel?.id },
-          "shopify oauth callback: web pixel activated",
-        );
-      }
-    } catch (error) {
-      app.log.error({ shop, error }, "shopify oauth callback: webPixelCreate threw");
-    }
+    await activateWebPixel(app.log, app.config, pixelApp, shop, accessToken);
 
     return reply.type("text/html").send(
       `<html><body style="font-family: sans-serif; padding: 2rem;"><h1>Tracking Platform Pixel instalado</h1><p>Pode fechar esta aba e voltar para a loja em Configurações &gt; Eventos de clientes.</p></body></html>`,
