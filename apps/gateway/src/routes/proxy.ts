@@ -1,7 +1,27 @@
 import type { FastifyInstance } from "fastify";
-import { verifyAppProxySignature } from "../lib/appProxy.js";
+import { verifyAppProxySignatureAny } from "../lib/appProxy.js";
 import { createTransfer, redeemTransfer } from "../lib/transfer.js";
 import { createTransferBodySchema, redeemTransferBodySchema } from "../lib/transferSchemas.js";
+import { getPixelApps } from "../lib/webPixelActivation.js";
+import type { GatewayConfig } from "../config.js";
+
+/**
+ * Every client secret that could legitimately have signed an incoming App
+ * Proxy request: the legacy single `SHOPIFY_APP_PROXY_SECRET` (kept for
+ * backward compatibility / single-app deployments) plus each of the
+ * per-store pixel apps' own client secrets (Store A/B/C — see
+ * lib/appProxy.ts's `verifyAppProxySignatureAny` doc comment for why a
+ * single shared secret cannot work once more than one Shopify app is
+ * involved). De-duplicated since A/B/C could in theory share a secret.
+ */
+function getAppProxySecretCandidates(config: GatewayConfig): string[] {
+  const secrets = new Set<string>();
+  if (config.SHOPIFY_APP_PROXY_SECRET) secrets.add(config.SHOPIFY_APP_PROXY_SECRET);
+  for (const pixelApp of getPixelApps(config)) {
+    secrets.add(pixelApp.clientSecret);
+  }
+  return [...secrets];
+}
 
 /**
  * Browser-facing counterparts of /v1/transfer/create and /v1/transfer/redeem,
@@ -22,13 +42,14 @@ export async function registerProxyRoutes(app: FastifyInstance): Promise<void> {
   app.addHook("preHandler", async (request, reply) => {
     if (!request.url.startsWith("/proxy/")) return;
 
-    if (!app.config.SHOPIFY_APP_PROXY_SECRET) {
-      request.log.error("SHOPIFY_APP_PROXY_SECRET is not configured");
+    const candidateSecrets = getAppProxySecretCandidates(app.config);
+    if (candidateSecrets.length === 0) {
+      request.log.error("no app proxy secret configured (SHOPIFY_APP_PROXY_SECRET / PIXEL_APP_*_CLIENT_SECRET)");
       return reply.code(501).send({ error: "app_proxy_not_configured" });
     }
 
     const url = new URL(request.url, "http://internal");
-    if (!verifyAppProxySignature(url.searchParams, app.config.SHOPIFY_APP_PROXY_SECRET)) {
+    if (!verifyAppProxySignatureAny(url.searchParams, candidateSecrets)) {
       return reply.code(401).send({ error: "invalid_app_proxy_signature" });
     }
   });

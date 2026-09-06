@@ -53,3 +53,35 @@ export function verifyAppProxySignature(searchParams: URLSearchParams, secret: s
   }
   return timingSafeEqual(expectedBuf, receivedBuf);
 }
+
+/**
+ * Verifies an App Proxy signature against a LIST of candidate secrets,
+ * accepting if any one of them produces a valid signature.
+ *
+ * Why this exists (bug found during the production readiness review after
+ * Store C was added — see docs/PHASE_LOG.md): the doc comment on
+ * `SHOPIFY_APP_PROXY_SECRET` in config.ts claims an App Proxy request is
+ * "signed with the app's one OAuth client secret, the same value regardless
+ * of which shop the request came from" — true only when a single Shopify
+ * app is installed across every store. This project actually ships THREE
+ * distinct apps (Store A/B/C, one per store, because Shopify allows only
+ * one Web Pixel extension per app), each with its OWN client secret. A
+ * same-origin `/apps/tracking/...` call from Hub is signed by App A's
+ * secret; the equivalent call from Alpha Tactical or Rugged destino is
+ * signed by App B's or App C's secret respectively. A single shared
+ * `SHOPIFY_APP_PROXY_SECRET` can therefore verify requests from at most ONE
+ * of the three stores — the other two would always get a false
+ * `invalid_app_proxy_signature`, silently breaking cross-domain transfer
+ * create/redeem for every store but one.
+ *
+ * The `shop` query param Shopify includes in every App Proxy request would
+ * let us pick the exact right secret deterministically, but that mapping
+ * (which store installed which of the three apps) isn't tracked anywhere
+ * in config today — trying every configured app secret and accepting the
+ * first match is simpler, doesn't require adding that mapping, and is not
+ * a weaker security property: forging a signature still requires knowing
+ * ONE of the real secrets, same as before.
+ */
+export function verifyAppProxySignatureAny(searchParams: URLSearchParams, secrets: readonly string[]): boolean {
+  return secrets.some((secret) => verifyAppProxySignature(searchParams, secret));
+}

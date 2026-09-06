@@ -26,11 +26,13 @@ export const storeEntrySchema = z.object({
    * each Shopify store that installs the tracking app gets its own webhook
    * subscriptions and its own secret) — used to verify
    * `X-Shopify-Hmac-Sha256` on `/webhooks/:store/*` for this shop_id.
-   * Distinct from `SHOPIFY_APP_PROXY_SECRET` below, which stays a single
-   * shared value on purpose (verified against shopify.dev: an App Proxy
-   * request is signed with the app's one OAuth client secret, the same
-   * value regardless of which shop the request came from — not a
-   * per-installation secret). */
+   * Distinct from `SHOPIFY_APP_PROXY_SECRET`/`PIXEL_APP_*_CLIENT_SECRET`
+   * below: an App Proxy request is signed with the client secret of the
+   * SPECIFIC APP that received the click on the storefront, which is a
+   * per-app secret, not a per-store one — see the corrected doc comment on
+   * `SHOPIFY_APP_PROXY_SECRET` below for the bug this project actually had
+   * (a single shared secret assumed one app installed everywhere, but this
+   * project ships three separate apps, one per store). */
   webhook_secret: z.string().min(1),
   /** The store's real `*.myshopify.com` domain — always what the OAuth
    * callback's `shop` query param carries (see routes/shopifyOauth.ts),
@@ -97,12 +99,32 @@ const configSchema = z.object({
         .filter(Boolean),
     ),
   TRANSFER_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().default(600),
-  /** The installed app's client secret, used to verify Shopify App Proxy
-   * request signatures on /proxy/* routes (see lib/appProxy.ts). ONE value
-   * shared across every store the app is installed on (verified against
-   * shopify.dev — App Proxy signing uses the app's single OAuth client
-   * secret, not a per-shop one). Optional in this phase so the Gateway can
-   * boot before a real app is registered; /proxy/* returns 501 until it's set. */
+  /**
+   * Legacy/single-app App Proxy secret, used to verify Shopify App Proxy
+   * request signatures on /proxy/* routes (see lib/appProxy.ts).
+   *
+   * CORRECTED (production readiness review, post Store-C): this was
+   * originally documented as "one value shared across every store the app
+   * is installed on", citing shopify.dev's statement that App Proxy signing
+   * uses the app's OAuth client secret rather than a per-shop one. That
+   * statement is true, but was misapplied here — it only means the secret
+   * is constant for a GIVEN APP across its installs, not that this whole
+   * project can use one shared secret. This project ships THREE separate
+   * Shopify apps (Store A/B/C, one per store, because Shopify allows only
+   * one Web Pixel extension per app — see PIXEL_APP_STORE_A/B/C_CLIENT_ID
+   * below), each with its own distinct client secret. An App Proxy call
+   * from Hub is signed with App A's secret; from Alpha Tactical or Rugged
+   * destino, App B's or App C's. This single variable can therefore verify
+   * at most one of the three stores.
+   *
+   * Fixed in routes/proxy.ts: it now verifies against every configured
+   * app's client secret (this one plus PIXEL_APP_STORE_A/B/C_CLIENT_SECRET
+   * via getAppProxySecretCandidates()/verifyAppProxySignatureAny()),
+   * accepting whichever one matches. Kept as its own optional variable for
+   * a deployment that fronts the App Proxy with a single app/secret not
+   * modeled as one of the PIXEL_APP_* pairs. Optional so the Gateway can
+   * boot before any app is registered; /proxy/* returns 501 until at least
+   * one candidate secret (this or a PIXEL_APP_*_CLIENT_SECRET) is set. */
   SHOPIFY_APP_PROXY_SECRET: z.string().optional(),
   /**
    * The registry of every Shopify store this Gateway talks to — the Hub

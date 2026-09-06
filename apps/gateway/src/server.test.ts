@@ -466,6 +466,69 @@ describe("App Proxy authenticated routes (/proxy/*) — browser-facing", () => {
     expect(redeemRes.statusCode).toBe(200);
     expect(redeemRes.json().tracking_id).toBe(trackingId);
   });
+
+  // Regression test for the real production bug found in the readiness
+  // review after Store C shipped: this project installs THREE separate
+  // Shopify apps (Store A/B/C), each with its own client secret — an App
+  // Proxy call from Store B's storefront is signed with STORE B's app
+  // secret, never the single legacy SHOPIFY_APP_PROXY_SECRET. Before the
+  // fix, `/proxy/*` only ever accepted the one shared secret, so two of
+  // the three real stores could never successfully call transfer
+  // create/redeem through their App Proxy at all.
+  it("accepts a request signed with a PER-APP client secret (Store B's), distinct from the shared SHOPIFY_APP_PROXY_SECRET", async () => {
+    const multiAppConfig = loadConfig({
+      DATABASE_URL: TEST_DATABASE_URL,
+      GATEWAY_HMAC_SECRET: HMAC_SECRET,
+      CORS_ALLOWLIST: "https://store-a.example.com",
+      SHOPIFY_STORES: JSON.stringify([
+        { shop_id: "store-a", domain: "store-a.example.com", role: "storefront", webhook_secret: "store-a-webhook-secret-test-only" },
+        { shop_id: "store-b", domain: "store-b.example.com", role: "checkout", webhook_secret: "store-b-webhook-secret-test-only" },
+      ]),
+      // Deliberately NOT the same as the shared legacy secret used by the
+      // rest of this suite's `app` instance.
+      PIXEL_APP_STORE_A_CLIENT_ID: "app-a-client-id",
+      PIXEL_APP_STORE_A_CLIENT_SECRET: "app-a-client-secret-test-only",
+      PIXEL_APP_STORE_B_CLIENT_ID: "app-b-client-id",
+      PIXEL_APP_STORE_B_CLIENT_SECRET: "app-b-client-secret-test-only",
+      TRANSFER_TOKEN_TTL_SECONDS: "600",
+    } as unknown as NodeJS.ProcessEnv);
+    const multiAppServer = await buildServer({ db, config: multiAppConfig });
+
+    try {
+      // The visitor must exist before /proxy/transfer/create can insert a
+      // transfer row referencing it (transfers.source_tracking_id FK) —
+      // same prerequisite the "full happy path" test above satisfies via a
+      // prior /v1/events call.
+      await multiAppServer.inject({
+        method: "POST",
+        url: "/v1/events",
+        payload: {
+          schema_version: "1.0",
+          event_id: "evt_multi_app_landing",
+          event_name: "page_viewed",
+          event_time: new Date().toISOString(),
+          shop: { shop_id: "store-a", role: "storefront" },
+          identity: { tracking_id: uuid(70), session_id: uuid(71) },
+          source: { origin: "browser" },
+          metadata: { environment: "development" },
+        },
+      });
+
+      const canonical = "shop=store-b.example.com";
+      const signature = createHmac("sha256", "app-b-client-secret-test-only").update(canonical).digest("hex");
+
+      const res = await multiAppServer.inject({
+        method: "POST",
+        url: `/proxy/transfer/create?shop=store-b.example.com&signature=${signature}`,
+        payload: JSON.stringify({ tracking_id: uuid(70), session_id: uuid(71), destination_shop_id: "store-a" }),
+        headers: { "content-type": "application/json" },
+      });
+
+      expect(res.statusCode).toBe(201);
+    } finally {
+      await multiAppServer.close();
+    }
+  });
 });
 
 describe("Identity Graph inputs recorded during /v1/events ingestion (Phase 8)", () => {
