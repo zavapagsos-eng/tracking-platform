@@ -12,6 +12,7 @@ import { registerTransferRoutes } from "./routes/transfer.js";
 import { registerProxyRoutes } from "./routes/proxy.js";
 import { registerWebhookRoutes } from "./routes/webhooks.js";
 import { registerAdminRoutes } from "./routes/admin.js";
+import { registerShopifyOauthRoutes } from "./routes/shopifyOauth.js";
 import { createMetaCapiQueue, type MetaCapiJobData } from "./lib/metaQueue.js";
 
 export interface GatewayDeps {
@@ -65,6 +66,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   await registerProxyRoutes(app);
   await registerWebhookRoutes(app);
   await registerAdminRoutes(app);
+  await registerShopifyOauthRoutes(app);
 
   return app;
 }

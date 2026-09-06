@@ -32,6 +32,13 @@ export const storeEntrySchema = z.object({
    * value regardless of which shop the request came from — not a
    * per-installation secret). */
   webhook_secret: z.string().min(1),
+  /** The store's real `*.myshopify.com` domain — always what the OAuth
+   * callback's `shop` query param carries (see routes/shopifyOauth.ts),
+   * which is NOT always the same as `domain` above (that field holds
+   * whichever domain the merchant's webhook routing uses, a custom domain
+   * for Hub/Alpha Tactical). Optional/backward-compatible: only needed for
+   * stores that go through the Web Pixel app-install OAuth flow. */
+  myshopify_domain: z.string().min(1).optional(),
 });
 export type StoreEntry = z.infer<typeof storeEntrySchema>;
 
@@ -190,6 +197,27 @@ const configSchema = z.object({
    * never a plaintext password — compared with a constant-time bcrypt
    * compare, never a raw string equality check. */
   ADMIN_DASHBOARD_PASSWORD_HASH: z.string().optional(),
+  /**
+   * Web Pixel app OAuth activation (see routes/shopifyOauth.ts). Each
+   * Shopify custom app can only ship ONE `web_pixel_extension` (a hard
+   * Shopify platform limit, confirmed the hard way — see docs/PHASE_LOG.md
+   * "Web Pixel — limite de 1 por app"), so this project ships TWO small
+   * apps: "Store A" (installed only on the Hub) and "Store B" (installed
+   * on every checkout-role destination store). Both pairs are optional so
+   * the Gateway can boot before either app exists; the callback route
+   * fails closed (404 unknown_app) for a client_id that doesn't match
+   * either pair, never a guessed fallback.
+   */
+  PIXEL_APP_STORE_A_CLIENT_ID: z.string().optional(),
+  PIXEL_APP_STORE_A_CLIENT_SECRET: z.string().optional(),
+  PIXEL_APP_STORE_B_CLIENT_ID: z.string().optional(),
+  PIXEL_APP_STORE_B_CLIENT_SECRET: z.string().optional(),
+  /** This Gateway's own public base URL — used both as the `gateway_url`
+   * Web Pixel setting (see routes/shopifyOauth.ts) and anywhere else the
+   * Gateway needs to describe itself to a browser/theme. Optional so the
+   * Gateway can boot before a public domain is provisioned; the OAuth
+   * callback fails closed rather than shipping an empty gateway_url. */
+  GATEWAY_PUBLIC_URL: z.string().optional(),
 });
 
 export type GatewayConfig = z.infer<typeof configSchema>;
@@ -212,4 +240,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): GatewayConfig 
  * an unregistered shop_id — callers must fail closed, never guess. */
 export function findStoreByShopId(config: GatewayConfig, shopId: string): StoreEntry | undefined {
   return config.SHOPIFY_STORES.find((store) => store.shop_id === shopId);
+}
+
+/** Looks up a store by its real `*.myshopify.com` domain — the only form
+ * of "which store is this" the Shopify OAuth callback ever hands us (see
+ * routes/shopifyOauth.ts). Falls back to matching `domain` too, since a
+ * store whose webhook-routing `domain` already IS its myshopify domain
+ * (e.g. Rugged destino, which has no separate custom domain) never needs
+ * `myshopify_domain` set separately. */
+export function findStoreByMyshopifyDomain(config: GatewayConfig, shop: string): StoreEntry | undefined {
+  return config.SHOPIFY_STORES.find((store) => store.myshopify_domain === shop || store.domain === shop);
 }
