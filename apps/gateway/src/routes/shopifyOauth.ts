@@ -147,7 +147,17 @@ export async function registerShopifyOauthRoutes(app: FastifyInstance): Promise<
       // (spec section 6/59: never guess a store's identity) — this store
       // still needs a SHOPIFY_STORES entry (with myshopify_domain set)
       // before its pixel can report events with a valid shop_id.
-      app.log.error({ shop }, "shopify oauth callback: no SHOPIFY_STORES entry for this shop");
+      // Logs only shop_id/domain/role — never webhook_secret — so this is
+      // safe to inspect via `railway logs` when diagnosing a mismatch
+      // between a real install's `shop` and this registry's `domain`/
+      // `myshopify_domain` without needing to expose any secret.
+      const knownStores = app.config.SHOPIFY_STORES.map((s) => ({
+        shop_id: s.shop_id,
+        domain: s.domain,
+        myshopify_domain: s.myshopify_domain,
+        role: s.role,
+      }));
+      app.log.error({ shop, knownStores }, "shopify oauth callback: no SHOPIFY_STORES entry for this shop");
       return reply
         .code(500)
         .type("text/html")
