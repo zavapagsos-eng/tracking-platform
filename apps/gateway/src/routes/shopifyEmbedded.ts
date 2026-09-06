@@ -94,7 +94,15 @@ function checkSessionTokenClaims(idToken: string, expectedShop: string): boolean
   return true;
 }
 
-async function exchangeToken(shop: string, app: PixelAppDef, idToken: string): Promise<string | null> {
+interface TokenExchangeResult {
+  accessToken: string | null;
+  /** Populated only on failure — status + response body (never the
+   * request body, which carries the client secret) — so the caller can
+   * log enough to diagnose a bad exchange without a second round-trip. */
+  failure?: { status: number; body: string };
+}
+
+async function exchangeToken(shop: string, app: PixelAppDef, idToken: string): Promise<TokenExchangeResult> {
   try {
     const response = await fetch(`https://${shop}/admin/oauth/access_token`, {
       method: "POST",
@@ -108,11 +116,17 @@ async function exchangeToken(shop: string, app: PixelAppDef, idToken: string): P
         requested_token_type: "urn:shopify:params:oauth:token-type:offline-access-token",
       }),
     });
-    if (!response.ok) return null;
-    const json = (await response.json()) as { access_token?: string };
-    return json.access_token ?? null;
-  } catch {
-    return null;
+    const text = await response.text();
+    if (!response.ok) {
+      return { accessToken: null, failure: { status: response.status, body: text } };
+    }
+    const json = JSON.parse(text) as { access_token?: string };
+    if (!json.access_token) {
+      return { accessToken: null, failure: { status: response.status, body: text } };
+    }
+    return { accessToken: json.access_token };
+  } catch (error) {
+    return { accessToken: null, failure: { status: 0, body: String(error) } };
   }
 }
 
@@ -141,11 +155,14 @@ export async function registerShopifyEmbeddedRoutes(app: FastifyInstance): Promi
       return reply.code(401).send({ error: "invalid_session_token" });
     }
 
-    const accessToken = await exchangeToken(shop, pixelApp, idToken);
-    if (!accessToken) {
-      app.log.error({ shop }, "shopify embedded bootstrap: token exchange failed");
+    const exchangeResult = await exchangeToken(shop, pixelApp, idToken);
+    if (!exchangeResult.accessToken) {
+      // `failure.body` is Shopify's own error response — never our
+      // request body, so this never logs the client secret.
+      app.log.error({ shop, failure: exchangeResult.failure }, "shopify embedded bootstrap: token exchange failed");
       return reply.code(502).send({ error: "token_exchange_failed" });
     }
+    const accessToken = exchangeResult.accessToken;
 
     await activateWebPixel(app.log, app.config, pixelApp, shop, accessToken);
 
