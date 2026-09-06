@@ -212,6 +212,17 @@ const configSchema = z.object({
   PIXEL_APP_STORE_A_CLIENT_SECRET: z.string().optional(),
   PIXEL_APP_STORE_B_CLIENT_ID: z.string().optional(),
   PIXEL_APP_STORE_B_CLIENT_SECRET: z.string().optional(),
+  /**
+   * A THIRD small app, added once it turned out Shopify's custom
+   * distribution locks one app's install link to a single store (or one
+   * Plus organization) permanently — confirmed the hard way when Store B's
+   * link, generated for Alpha Tactical Shop, could not also be used for
+   * Rugged destino. Same `kind: "checkout"` role as Store B (see
+   * getPixelApps in lib/webPixelActivation.ts); every additional
+   * checkout-role destination store beyond the first needs its own such
+   * pair. Optional for the same boot-before-configured reason as A/B. */
+  PIXEL_APP_STORE_C_CLIENT_ID: z.string().optional(),
+  PIXEL_APP_STORE_C_CLIENT_SECRET: z.string().optional(),
   /** This Gateway's own public base URL — used both as the `gateway_url`
    * Web Pixel setting (see routes/shopifyOauth.ts) and anywhere else the
    * Gateway needs to describe itself to a browser/theme. Optional so the

@@ -37,6 +37,13 @@ export function getPixelApps(config: GatewayConfig): PixelAppDef[] {
       kind: "checkout",
     });
   }
+  if (config.PIXEL_APP_STORE_C_CLIENT_ID && config.PIXEL_APP_STORE_C_CLIENT_SECRET) {
+    apps.push({
+      clientId: config.PIXEL_APP_STORE_C_CLIENT_ID,
+      clientSecret: config.PIXEL_APP_STORE_C_CLIENT_SECRET,
+      kind: "checkout",
+    });
+  }
   return apps;
 }
 
