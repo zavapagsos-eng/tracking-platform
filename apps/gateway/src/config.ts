@@ -218,6 +218,18 @@ const configSchema = z.object({
    * Gateway can boot before a public domain is provisioned; the OAuth
    * callback fails closed rather than shipping an empty gateway_url. */
   GATEWAY_PUBLIC_URL: z.string().optional(),
+  /**
+   * Non-secret overlay for `SHOPIFY_STORES` entries created before the
+   * Web Pixel OAuth flow existed: a JSON object mapping `shop_id` ->
+   * `myshopify_domain`, e.g. `{"hub":"tmeqdz-q1.myshopify.com"}`. Kept as
+   * its own variable (rather than requiring every `SHOPIFY_STORES` entry
+   * to be rewritten in place) specifically so adding a store's
+   * myshopify_domain never requires re-typing that store's
+   * `webhook_secret` — a real secret this deployment's operator may not
+   * have in hand when only the domain mapping is what's missing. Applied
+   * in `loadConfig` below; a `myshopify_domain` already present on the
+   * `SHOPIFY_STORES` entry itself always wins. */
+  SHOPIFY_MYSHOPIFY_DOMAINS: z.string().optional(),
 });
 
 export type GatewayConfig = z.infer<typeof configSchema>;
@@ -230,6 +242,20 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): GatewayConfig 
       .join("; ");
     throw new Error(`Invalid Gateway configuration: ${details}`);
   }
+
+  if (result.data.SHOPIFY_MYSHOPIFY_DOMAINS) {
+    let domainMap: Record<string, string> = {};
+    try {
+      domainMap = JSON.parse(result.data.SHOPIFY_MYSHOPIFY_DOMAINS) as Record<string, string>;
+    } catch {
+      throw new Error("Invalid Gateway configuration: SHOPIFY_MYSHOPIFY_DOMAINS must be valid JSON");
+    }
+    result.data.SHOPIFY_STORES = result.data.SHOPIFY_STORES.map((store) => ({
+      ...store,
+      myshopify_domain: store.myshopify_domain ?? domainMap[store.shop_id],
+    }));
+  }
+
   return result.data;
 }
 
