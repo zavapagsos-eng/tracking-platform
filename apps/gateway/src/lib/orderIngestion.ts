@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { eq } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 import { schema, type Database } from "@tracking/db";
 import type { TrackingEventName } from "@tracking/schema";
 import { recordEvent } from "./eventRegistry.js";
@@ -53,6 +53,22 @@ const orderBillingAddressSchema = z.object({
   country_code: z.string().nullable().optional(),
 });
 
+/**
+ * Standard Shopify Order field — arbitrary key/value pairs a merchant's
+ * own theme/app attached to the cart before checkout (REST calls it
+ * `note_attributes`; same data as GraphQL Order.customAttributes). This
+ * Gateway doesn't originate these — see snippets/tp-checkout-attribution.liquid
+ * (Hub theme) — it only reads them back off the order that's ultimately
+ * created, which may be on a DIFFERENT shop than the one the attributes
+ * were written on (the merchant's own cross-domain checkout router copies
+ * them across — see `linkCrossDomainCheckoutAttribution` below for why
+ * that copy is what makes this whole thing worth reading).
+ */
+const orderNoteAttributeSchema = z.object({
+  name: z.string(),
+  value: z.string().nullable().optional(),
+});
+
 const orderWebhookPayloadSchema = z.object({
   id: z.union([z.number(), z.string()]).transform(String),
   checkout_token: z.string().nullable().optional(),
@@ -74,6 +90,7 @@ const orderWebhookPayloadSchema = z.object({
   phone: z.string().nullable().optional(),
   customer: orderCustomerSchema.nullable().optional(),
   billing_address: orderBillingAddressSchema.nullable().optional(),
+  note_attributes: z.array(orderNoteAttributeSchema).nullable().optional(),
 });
 
 const refundWebhookPayloadSchema = z.object({
@@ -170,6 +187,7 @@ export async function ingestOrderWebhook(
     });
 
   await backfillCustomerIdentityFromOrder(db, { orderId: payload.id, checkoutToken, payload });
+  await linkCrossDomainCheckoutAttribution(db, { checkoutToken, payload });
 
   const eventId = orderEventId(topic, shopId, payload.id);
   await recordEvent(db, {
@@ -265,6 +283,134 @@ export async function backfillCustomerIdentityFromOrder(
         source: "shopify_order_webhook",
       })
       .onConflictDoNothing();
+  }
+}
+
+const NOTE_ATTRIBUTE_FIELD_MAP = {
+  tp_tracking_id: "trackingId",
+  tp_fbp: "fbp",
+  tp_fbc: "fbc",
+  tp_fbclid: "fbclid",
+} as const satisfies Record<string, keyof TrackingPlatformCartAttributes>;
+
+export interface TrackingPlatformCartAttributes {
+  trackingId?: string;
+  fbp?: string;
+  fbc?: string;
+  fbclid?: string;
+}
+
+/**
+ * Reads back the `tp_tracking_id`/`tp_fbp`/`tp_fbc`/`tp_fbclid` cart
+ * attributes written by `snippets/tp-checkout-attribution.liquid` (Hub
+ * theme) — additive, never assumed present: a plain single-store order
+ * simply won't have these, and that's a normal, expected case, not an
+ * error.
+ */
+export function extractTrackingPlatformCartAttributes(
+  noteAttributes: OrderWebhookPayload["note_attributes"],
+): TrackingPlatformCartAttributes {
+  const result: TrackingPlatformCartAttributes = {};
+  for (const attr of noteAttributes ?? []) {
+    const field = NOTE_ATTRIBUTE_FIELD_MAP[attr.name as keyof typeof NOTE_ATTRIBUTE_FIELD_MAP];
+    if (field && attr.value) result[field] = attr.value;
+  }
+  return result;
+}
+
+/**
+ * Closes the cross-domain attribution gap left open by the merchant's own
+ * "Smart Order Router" (a third-party theme script + backend, NOT part of
+ * this Gateway — see docs/PHASE_LOG.md for the investigation): it
+ * redirects the customer from the Hub storefront to a REAL checkout on a
+ * different destination shop chosen by round-robin, so the order webhook
+ * this Gateway receives is always on the destination shop, never Hub.
+ * `reconstructJourneyByOrderId` (lib/journey.ts) resolves that order back
+ * to a `session_id`/`tracking_id` via `checkout_token` just fine — but
+ * it's the DESTINATION shop's own tracking_id, whose session has no
+ * attribution touches of its own the first time a given browser ever
+ * lands on that domain. The customer's actual ad click was recorded under
+ * a DIFFERENT tracking_id, in Hub's own first-party cookie space.
+ *
+ * `tp-checkout-attribution.liquid` bridges that gap client-side by
+ * reading Hub's own `_tp_tid` cookie (this Gateway's own pixel-kit
+ * identity, see packages/pixel-kit/src/identity.ts) into a Shopify cart
+ * attribute; the Router (once patched to do a generic passthrough — see
+ * docs/PHASE_LOG.md) copies Hub's cart attributes onto the destination
+ * checkout, so they land on the resulting order's `note_attributes`. This
+ * function is the other half: it turns `tp_tracking_id` into a real
+ * `session_id <-> session_id` DETERMINISTIC identity_links edge between
+ * the destination session and Hub's own (most recent) session for that
+ * tracking_id — the exact edge shape `reconstructJourneyByTrackingId`'s
+ * BFS already walks (lib/journey.ts), so no changes are needed there or
+ * in lib/metaCapiPurchase.ts: once this edge exists, Hub's own
+ * attribution touches (fbc/fbp from Hub's own Web Pixel) are
+ * automatically pulled into the Purchase event's journey.
+ *
+ * Deliberately does nothing (not an error) when: there's no
+ * `checkout_token` correlation, no `tp_tracking_id` attribute on this
+ * order, that tracking_id happens to already match the destination's own
+ * (shouldn't normally occur — different shops, different cookie spaces —
+ * but harmless if it ever does), or this Gateway has no session on record
+ * for that tracking_id at all (e.g. ad blocker on Hub, or the pixel
+ * hasn't recorded a session yet) — the missing bridge just means Purchase
+ * falls back to the destination-only journey, same as before this
+ * function existed.
+ */
+export async function linkCrossDomainCheckoutAttribution(
+  db: Database,
+  params: { checkoutToken: string | undefined; payload: OrderWebhookPayload },
+): Promise<void> {
+  const { checkoutToken, payload } = params;
+  if (!checkoutToken) return;
+
+  const cartAttributes = extractTrackingPlatformCartAttributes(payload.note_attributes);
+  if (!cartAttributes.trackingId) return;
+
+  const resolved = await resolveSessionForCheckoutToken(db, checkoutToken);
+  if (resolved.status !== "ok") return;
+  if (resolved.trackingId === cartAttributes.trackingId) return; // already the same identity
+
+  const [originSession] = await db
+    .select({ sessionId: schema.sessions.sessionId })
+    .from(schema.sessions)
+    .where(eq(schema.sessions.trackingId, cartAttributes.trackingId))
+    .orderBy(desc(schema.sessions.startedAt))
+    .limit(1);
+  // tp_tracking_id doesn't match any session this Gateway has on record —
+  // e.g. the cookie was set by a pixel install this Gateway doesn't know
+  // about. Nothing to bridge to; never fabricate a session.
+  if (!originSession) return;
+
+  await db
+    .insert(schema.identityLinks)
+    .values({
+      entityAType: "session_id",
+      entityAValue: resolved.sessionId,
+      entityBType: "session_id",
+      entityBValue: originSession.sessionId,
+      confidence: "DETERMINISTIC",
+      source: "cross_domain_checkout_cart_attributes",
+    })
+    .onConflictDoNothing();
+
+  // Defense in depth: also record the exact fbp/fbc the Hub-side snippet
+  // read straight off the browser's cookies at the moment of the checkout
+  // click, as their own touch tied to Hub's tracking_id. The identity_links
+  // edge above already exposes Hub's EXISTING touches (from this
+  // Gateway's own Web Pixel) to the journey walk, so this is redundant in
+  // the common case — but it costs nothing and covers the edge case where
+  // Hub's pixel touch for this visit is missing, late, or lacks fbc/fbp
+  // (e.g. consent granted only right at checkout).
+  if (cartAttributes.fbp || cartAttributes.fbc) {
+    await db.insert(schema.attributionTouches).values({
+      trackingId: cartAttributes.trackingId,
+      sessionId: originSession.sessionId,
+      fbp: cartAttributes.fbp,
+      fbc: cartAttributes.fbc,
+      fbclid: cartAttributes.fbclid,
+      source: "tp_checkout_attribution_snippet",
+    });
   }
 }
 
