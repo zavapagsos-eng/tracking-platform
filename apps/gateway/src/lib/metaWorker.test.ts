@@ -219,7 +219,8 @@ describe("Meta CAPI worker (integration: real Postgres + real Redis, mocked fetc
 
     const row = await waitFor(async () => getDeadLetterRow("o4", "store-b"));
     expect(row.failure_reason).toBe("meta_capi_retryable_http_error_400");
-    expect(row.attempts_made).toBe(2);
+    // attempts_made counts dead-letterings (one here), not BullMQ attempts.
+    expect(row.attempts_made).toBe(1);
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
@@ -234,7 +235,7 @@ describe("Meta CAPI worker (integration: real Postgres + real Redis, mocked fetc
 
     const row = await waitFor(async () => getDeadLetterRow("o5", "store-b"));
     expect(row.failure_reason).toContain("meta_capi_network_error");
-    expect(row.attempts_made).toBe(2);
+    expect(row.attempts_made).toBe(1);
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 

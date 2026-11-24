@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { schema, type Database } from "@tracking/db";
 
 /**
@@ -8,9 +8,17 @@ import { schema, type Database } from "@tracking/db";
  * Postgres rather than only in BullMQ's own Redis-backed failed set.
  *
  * Idempotent on `(queue_name, job_id)`: a second failure of the same
- * logical job updates the existing row (latest reason/attempt count/
- * timestamp) instead of accumulating duplicates for what is, semantically,
- * still the same stuck job.
+ * logical job updates the existing row (latest reason/timestamp) instead of
+ * accumulating duplicates for what is, semantically, still the same stuck
+ * job.
+ *
+ * `attempts_made` counts how many times this job has landed here — one
+ * per dead-lettering, summed across Reconciliation requeue cycles — so
+ * `RECONCILIATION_MAX_REQUEUE_ATTEMPTS` really bounds the number of
+ * requeues. It used to be overwritten with BullMQ's per-job attempt count,
+ * which reset to 1 on every requeue (structural gaps retried forever) and
+ * started at the queue's full attempt budget for a terminal Meta error
+ * (transient errors were never requeued even once).
  */
 export async function recordDeadLetter(
   db: Database,
@@ -19,7 +27,6 @@ export async function recordDeadLetter(
     jobId: string;
     jobData: unknown;
     failureReason: string;
-    attemptsMade: number;
   },
 ): Promise<void> {
   await db
@@ -29,13 +36,13 @@ export async function recordDeadLetter(
       jobId: params.jobId,
       jobData: params.jobData,
       failureReason: params.failureReason,
-      attemptsMade: params.attemptsMade,
+      attemptsMade: 1,
     })
     .onConflictDoUpdate({
       target: [schema.deadLetters.queueName, schema.deadLetters.jobId],
       set: {
         failureReason: params.failureReason,
-        attemptsMade: params.attemptsMade,
+        attemptsMade: sql`${schema.deadLetters.attemptsMade} + 1`,
         lastFailedAt: new Date(),
       },
     });

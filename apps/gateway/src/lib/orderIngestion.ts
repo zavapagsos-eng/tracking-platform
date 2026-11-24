@@ -154,7 +154,7 @@ export function refundEventId(shopId: string, refundId: string): string {
 export async function ingestOrderWebhook(
   db: Database,
   params: { shopId: string; topic: OrderWebhookTopicValue; payload: OrderWebhookPayload },
-): Promise<void> {
+): Promise<{ crossDomainLink: CrossDomainLinkOutcome }> {
   const { shopId, topic, payload } = params;
   const checkoutToken = payload.checkout_token ?? payload.cart_token ?? undefined;
 
@@ -187,7 +187,7 @@ export async function ingestOrderWebhook(
     });
 
   await backfillCustomerIdentityFromOrder(db, { orderId: payload.id, checkoutToken, payload });
-  await linkCrossDomainCheckoutAttribution(db, { checkoutToken, payload });
+  const crossDomainLink = await linkCrossDomainCheckoutAttribution(db, { checkoutToken, payload });
 
   const eventId = orderEventId(topic, shopId, payload.id);
   await recordEvent(db, {
@@ -215,6 +215,8 @@ export async function ingestOrderWebhook(
     source: { origin: "webhook", ingested_via: "shopify_admin_webhook" },
     metadata: { environment: "development" },
   });
+
+  return { crossDomainLink };
 }
 
 /**
@@ -357,19 +359,33 @@ export function extractTrackingPlatformCartAttributes(
  * falls back to the destination-only journey, same as before this
  * function existed.
  */
+/**
+ * What `linkCrossDomainCheckoutAttribution` did. Every non-`linked`
+ * outcome is returned (not swallowed) so the webhook route can log it: an
+ * order that lost its Hub attribution must be visible, not just quietly
+ * sent to Meta without fbc/fbp.
+ */
+export type CrossDomainLinkOutcome =
+  | "linked"
+  | "no_checkout_token"
+  | "no_tp_tracking_id"
+  | "checkout_not_tracked"
+  | "same_identity"
+  | "origin_session_not_found";
+
 export async function linkCrossDomainCheckoutAttribution(
   db: Database,
   params: { checkoutToken: string | undefined; payload: OrderWebhookPayload },
-): Promise<void> {
+): Promise<CrossDomainLinkOutcome> {
   const { checkoutToken, payload } = params;
-  if (!checkoutToken) return;
+  if (!checkoutToken) return "no_checkout_token";
 
   const cartAttributes = extractTrackingPlatformCartAttributes(payload.note_attributes);
-  if (!cartAttributes.trackingId) return;
+  if (!cartAttributes.trackingId) return "no_tp_tracking_id";
 
   const resolved = await resolveSessionForCheckoutToken(db, checkoutToken);
-  if (resolved.status !== "ok") return;
-  if (resolved.trackingId === cartAttributes.trackingId) return; // already the same identity
+  if (resolved.status !== "ok") return "checkout_not_tracked";
+  if (resolved.trackingId === cartAttributes.trackingId) return "same_identity";
 
   const [originSession] = await db
     .select({ sessionId: schema.sessions.sessionId })
@@ -380,7 +396,7 @@ export async function linkCrossDomainCheckoutAttribution(
   // tp_tracking_id doesn't match any session this Gateway has on record —
   // e.g. the cookie was set by a pixel install this Gateway doesn't know
   // about. Nothing to bridge to; never fabricate a session.
-  if (!originSession) return;
+  if (!originSession) return "origin_session_not_found";
 
   await db
     .insert(schema.identityLinks)
@@ -412,6 +428,7 @@ export async function linkCrossDomainCheckoutAttribution(
       source: "tp_checkout_attribution_snippet",
     });
   }
+  return "linked";
 }
 
 export async function ingestRefundWebhook(

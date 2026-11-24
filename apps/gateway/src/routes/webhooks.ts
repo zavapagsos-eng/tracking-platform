@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z, ZodError } from "zod";
 import { schema } from "@tracking/db";
 import { verifyShopifyWebhookHmac } from "../lib/shopifyWebhookAuth.js";
-import { recordWebhookReceipt } from "../lib/webhookReceipt.js";
+import { markWebhookProcessed, recordWebhookReceipt } from "../lib/webhookReceipt.js";
 import {
   ingestOrderWebhook,
   ingestRefundWebhook,
@@ -99,7 +99,19 @@ async function checkIdempotency(
     webhookId: auth.webhookId,
     hmacValid: true,
   });
-  return result.status;
+  // A redelivery of a webhook whose earlier attempt never finished is
+  // processed again rather than acknowledged as a duplicate.
+  return result.status === "duplicate" ? "duplicate" : "new";
+}
+
+/**
+ * Marks the delivery as processed and acknowledges it. Called only on the
+ * success path, so a delivery that failed part-way stays `received` and
+ * Shopify's redelivery gets processed instead of dropped.
+ */
+async function sendProcessed(app: FastifyInstance, auth: AuthorizedWebhook, reply: FastifyReply) {
+  await markWebhookProcessed(app.db, { shopId: auth.store, webhookId: auth.webhookId });
+  return reply.code(200).send({ status: "processed" });
 }
 
 /** Loose, defensive schemas for the three GDPR mandatory compliance
@@ -192,7 +204,7 @@ export async function registerWebhookRoutes(app: FastifyInstance): Promise<void>
       await ingestOrderWebhook(app.db, { shopId: auth.store, topic: OrderWebhookTopic.Create, payload });
     });
     if (failed) return;
-    return reply.code(200).send({ status: "processed" });
+    return sendProcessed(app, auth, reply);
   });
 
   // The Purchase-confirmation trigger (spec section 8/24; resolves the
@@ -216,7 +228,21 @@ export async function registerWebhookRoutes(app: FastifyInstance): Promise<void>
     let payload: OrderWebhookPayload | undefined;
     const failed = await tryIngest(reply, async () => {
       payload = parseOrderWebhookPayload(request.body);
-      await ingestOrderWebhook(app.db, { shopId: auth.store, topic: OrderWebhookTopic.Paid, payload });
+      const { crossDomainLink } = await ingestOrderWebhook(app.db, {
+        shopId: auth.store,
+        topic: OrderWebhookTopic.Paid,
+        payload,
+      });
+      // Paid orders on a checkout store should carry the Hub's tp_* cart
+      // attributes (forwarded by the order router). When the Hub session
+      // can't be linked, the Purchase still goes to Meta but without the
+      // ad click's fbc/fbp — log it so lost attribution is visible.
+      if (crossDomainLink !== "linked" && crossDomainLink !== "same_identity") {
+        request.log.warn(
+          { store: auth.store, orderId: payload.id, crossDomainLink },
+          "paid order not linked to a Hub session; Purchase will lack Hub ad-click attribution",
+        );
+      }
     });
     if (failed) return;
 
@@ -235,7 +261,7 @@ export async function registerWebhookRoutes(app: FastifyInstance): Promise<void>
       }
     }
 
-    return reply.code(200).send({ status: "processed" });
+    return sendProcessed(app, auth, reply);
   });
 
   app.post<{ Params: { store: string } }>("/webhooks/:store/orders/cancelled", async (request, reply) => {
@@ -250,7 +276,7 @@ export async function registerWebhookRoutes(app: FastifyInstance): Promise<void>
       await ingestOrderWebhook(app.db, { shopId: auth.store, topic: OrderWebhookTopic.Cancelled, payload });
     });
     if (failed) return;
-    return reply.code(200).send({ status: "processed" });
+    return sendProcessed(app, auth, reply);
   });
 
   app.post<{ Params: { store: string } }>("/webhooks/:store/refunds/create", async (request, reply) => {
@@ -265,7 +291,7 @@ export async function registerWebhookRoutes(app: FastifyInstance): Promise<void>
       await ingestRefundWebhook(app.db, { shopId: auth.store, payload });
     });
     if (failed) return;
-    return reply.code(200).send({ status: "processed" });
+    return sendProcessed(app, auth, reply);
   });
 
   app.post<{ Params: { store: string } }>(
@@ -287,7 +313,7 @@ export async function registerWebhookRoutes(app: FastifyInstance): Promise<void>
         entity: "customer",
         entityId: parsed.data.customer?.id,
       });
-      return reply.code(200).send({ status: "processed" });
+      return sendProcessed(app, auth, reply);
     },
   );
 
@@ -308,7 +334,7 @@ export async function registerWebhookRoutes(app: FastifyInstance): Promise<void>
       entity: "customer",
       entityId: parsed.data.customer?.id,
     });
-    return reply.code(200).send({ status: "processed" });
+    return sendProcessed(app, auth, reply);
   });
 
   app.post<{ Params: { store: string } }>("/webhooks/:store/shop/redact", async (request, reply) => {
@@ -328,6 +354,6 @@ export async function registerWebhookRoutes(app: FastifyInstance): Promise<void>
       entity: "shop",
       entityId: parsed.data.shop_domain ?? (parsed.data.shop_id !== undefined ? String(parsed.data.shop_id) : undefined),
     });
-    return reply.code(200).send({ status: "processed" });
+    return sendProcessed(app, auth, reply);
   });
 }

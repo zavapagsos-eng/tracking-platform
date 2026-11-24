@@ -229,7 +229,6 @@ describe("GET /admin/dead-letters", () => {
       jobId: purchaseEventId("store-b", "o_dl_admin"),
       jobData: { orderId: "o_dl_admin", shopId: "store-b" },
       failureReason: "consent_not_granted",
-      attemptsMade: 1,
     });
 
     const res = await app.inject({

@@ -185,6 +185,31 @@ describe("Shopify webhook HMAC + idempotency", () => {
     expect(receipts.rowCount).toBe(1);
   });
 
+  it("reprocesses a redelivery whose earlier attempt failed instead of dropping it as a duplicate", async () => {
+    // First delivery fails validation (no id) — Shopify will retry it.
+    const bad = await webhookPost(
+      "/webhooks/store-b/orders/create",
+      { created_at: new Date().toISOString() },
+      { topic: "orders/create", webhookId: "wh_order_create_retry" },
+    );
+    expect(bad.statusCode).toBe(400);
+
+    const retry = await webhookPost(
+      "/webhooks/store-b/orders/create",
+      { id: 5003, created_at: new Date().toISOString() },
+      { topic: "orders/create", webhookId: "wh_order_create_retry" },
+    );
+    expect(retry.statusCode).toBe(200);
+    expect(retry.json()).toEqual({ status: "processed" });
+
+    const orders = await pool.query("SELECT * FROM orders WHERE order_id = '5003'");
+    expect(orders.rowCount).toBe(1);
+    const receipts = await pool.query(
+      "SELECT processing_status FROM webhook_receipts WHERE webhook_id = 'wh_order_create_retry'",
+    );
+    expect(receipts.rows).toEqual([{ processing_status: "processed" }]);
+  });
+
   it("transitions an order to PAID on orders/paid", async () => {
     await webhookPost(
       "/webhooks/store-b/orders/create",

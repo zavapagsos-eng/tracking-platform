@@ -1,0 +1,79 @@
+<script>
+(function () {
+  // Tracking Platform — captura de atribuição para o checkout cross-store.
+  // Não mexe no msor-checkout-intercept nem em nenhum app: só lê cookies que
+  // já existem na página e grava como "cart attributes" nativos do Shopify
+  // (recurso padrão, documentado, /cart/update.js). Se o Smart Order Router
+  // carregar o carrinho pra montar o checkout de destino, esses atributos
+  // tendem a ir junto e aparecer no pedido final em "Detalhes adicionais".
+  // Falha sempre em silêncio — nunca deve atrapalhar a navegação real.
+
+  function getCookie(name) {
+    var escaped = name.replace(/([.$?*|{}()\[\]\\\/+^])/g, "\\$1");
+    var match = document.cookie.match(new RegExp("(?:^|; )" + escaped + "=([^;]*)"));
+    return match ? decodeURIComponent(match[1]) : null;
+  }
+
+  function getQueryParam(name) {
+    try {
+      return new URLSearchParams(window.location.search).get(name);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function syncAttributes() {
+    var trackingId = getCookie("_tp_tid"); // gerado pelo nosso próprio Web Pixel (Tracking Platform Pixels)
+    var fbp = getCookie("_fbp");
+    var fbc = getCookie("_fbc");
+    var fbclid = getQueryParam("fbclid");
+
+    if (fbclid) {
+      try {
+        sessionStorage.setItem("_tp_fbclid_seen", fbclid);
+      } catch (e) {}
+    } else {
+      try {
+        fbclid = sessionStorage.getItem("_tp_fbclid_seen");
+      } catch (e) {}
+    }
+
+    var attributes = {};
+    if (trackingId) attributes.tp_tracking_id = trackingId;
+    if (fbp) attributes.tp_fbp = fbp;
+    if (fbc) attributes.tp_fbc = fbc;
+    if (fbclid) attributes.tp_fbclid = fbclid;
+
+    if (Object.keys(attributes).length === 0) return;
+
+    fetch("/cart/update.js", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ attributes: attributes }),
+    }).catch(function () {
+      // Intencionalmente ignorado — nunca deve travar a compra.
+    });
+  }
+
+  // Roda logo, e de novo um pouco depois (o cookie do nosso pixel e o da
+  // Meta podem demorar um instante pra existir na primeira visita).
+  syncAttributes();
+  setTimeout(syncAttributes, 800);
+  setTimeout(syncAttributes, 2500);
+
+  // E roda de novo bem no momento em que o cliente clica em algo que parece
+  // ser o botão de finalizar/checkout — em paralelo com o
+  // msor-checkout-intercept, sem interferir nele (não faz preventDefault,
+  // não é bloqueante).
+  document.addEventListener(
+    "click",
+    function (event) {
+      var trigger = event.target.closest
+        ? event.target.closest('button[type="submit"], input[type="submit"]')
+        : null;
+      if (trigger) syncAttributes();
+    },
+    true,
+  );
+})();
+</script>

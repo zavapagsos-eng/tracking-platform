@@ -71,15 +71,6 @@ export function buildMetaCapiProcessor(db: Database, config: GatewayConfig) {
           jobId: job.id ?? purchaseEventId(job.data.shopId, job.data.orderId),
           jobData: job.data,
           failureReason: result.status,
-          // `job.attemptsMade` only increments AFTER the processor returns
-          // (verified in the installed package's source, Phase 11
-          // research: `Job.moveToCompleted`/`moveToFailed`) — from inside
-          // the still-running processor it reflects attempts before this
-          // one, so `+ 1` is what makes this recorded count mean "this
-          // call was attempt number N", consistent with the `failed`
-          // listener below (which runs after that increment already
-          // happened, so needs no such adjustment).
-          attemptsMade: job.attemptsMade + 1,
         });
         return;
     }
@@ -121,7 +112,6 @@ export function createMetaCapiWorker(
       jobId: job.id ?? purchaseEventId(job.data.shopId, job.data.orderId),
       jobData: job.data,
       failureReason: err instanceof Error ? err.message : String(err),
-      attemptsMade: job.attemptsMade,
     }).catch((dbErr) => {
       // Never let a dead-letter bookkeeping failure crash the worker
       // process itself (fail-open, same philosophy as the rest of this

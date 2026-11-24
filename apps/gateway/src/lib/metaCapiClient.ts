@@ -11,6 +11,8 @@ import type { GatewayConfig } from "../config.js";
  *           test_event_code?: string }
  * `event_time` is Unix seconds (not milliseconds).
  */
+const META_REQUEST_TIMEOUT_MS = 15_000;
+
 export interface MetaCapiCustomData {
   currency?: string;
   value?: number;
@@ -109,6 +111,9 @@ export async function sendMetaCapiEvent(
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
+      // A stalled connection must not hold a worker slot forever; a timeout
+      // surfaces as a network_error, which the worker retries.
+      signal: AbortSignal.timeout(META_REQUEST_TIMEOUT_MS),
     });
   } catch (err) {
     const rawMessage = err instanceof Error ? err.message : String(err);

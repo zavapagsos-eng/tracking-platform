@@ -164,7 +164,6 @@ describe("scanPaidOrders", () => {
       jobId: eventId,
       jobData: { orderId: "o_unattr", shopId: "store-b" },
       failureReason: "consent_not_granted",
-      attemptsMade: 1,
     });
 
     const details = await scanPaidOrders(db, baseConfig());
@@ -179,7 +178,6 @@ describe("scanPaidOrders", () => {
       jobId: eventId,
       jobData: { orderId: "o_meta_err", shopId: "store-b" },
       failureReason: "meta_capi_permanent_http_error_190",
-      attemptsMade: 1,
     });
 
     const details = await scanPaidOrders(db, baseConfig());
@@ -210,7 +208,6 @@ describe("scanPaidOrders", () => {
       jobId: eventId,
       jobData: { orderId: "o_recovered", shopId: "store-b" },
       failureReason: "meta_capi_retryable_http_error_500",
-      attemptsMade: 2,
     });
     await seedEventRegistry(eventId, true);
     await seedDelivery(eventId, {});
@@ -301,7 +298,6 @@ describe("requeueEligibleOrders", () => {
       jobId: eventId,
       jobData: { orderId: "o_requeue_eligible", shopId: "store-b" },
       failureReason: "consent_not_granted",
-      attemptsMade: 1,
     });
     await pool.query("UPDATE dead_letters SET last_failed_at = $1 WHERE job_id = $2", [
       new Date(Date.now() - 2 * 60 * 60_000),
@@ -323,7 +319,6 @@ describe("requeueEligibleOrders", () => {
       jobId: eventId,
       jobData: { orderId: "o_cooldown", shopId: "store-b" },
       failureReason: "meta_capi_retryable_http_error_500",
-      attemptsMade: 1,
     });
 
     const details: ReconciliationOrderDetail[] = [
@@ -339,13 +334,15 @@ describe("requeueEligibleOrders", () => {
   it("does NOT requeue an order that already exhausted RECONCILIATION_MAX_REQUEUE_ATTEMPTS", async () => {
     queue = createMetaCapiQueue(baseConfig({ REDIS_URL: TEST_REDIS_URL }), { prefix: QUEUE_PREFIX })!;
     const eventId = purchaseEventId("store-b", "o_exhausted");
-    await recordDeadLetter(db, {
-      queueName: "meta-capi-purchase",
-      jobId: eventId,
-      jobData: { orderId: "o_exhausted", shopId: "store-b" },
-      failureReason: "meta_capi_retryable_http_error_500",
-      attemptsMade: 3,
-    });
+    // Three separate dead-letterings of the same job (one per requeue cycle).
+    for (let i = 0; i < 3; i++) {
+      await recordDeadLetter(db, {
+        queueName: "meta-capi-purchase",
+        jobId: eventId,
+        jobData: { orderId: "o_exhausted", shopId: "store-b" },
+        failureReason: "meta_capi_retryable_http_error_500",
+      });
+    }
     await pool.query("UPDATE dead_letters SET last_failed_at = $1 WHERE job_id = $2", [
       new Date(Date.now() - 2 * 60 * 60_000),
       eventId,
